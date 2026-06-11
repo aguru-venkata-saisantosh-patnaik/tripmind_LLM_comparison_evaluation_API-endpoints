@@ -2,7 +2,9 @@
 
 Autonomous multi-agent AI travel optimizer that finds **Price-Pivot Points** — transit, accommodation, and activity substitutions that save ≥5% without degrading trip quality.
 
-Built for Indian domestic travel. Trains three SLMs (fine-tuned, distilled, curriculum-trained) and compares them — testing whether richer teacher signal from agent reasoning traces improves generalization over plain SFT on synthetic data.
+Built for Indian domestic travel. Trains three Llama 3.1 8B SLMs via different supervision signals (SFT, distillation, curriculum), then benchmarks all three against an untuned baseline. The central research question: does richer teacher signal from multi-agent reasoning traces produce a better travel optimizer than plain SFT on synthetic pairs?
+
+**Total project cost: $8.** Phase 1 (5,000 synthetic pairs via GPT-4o-mini) cost $4. Phase 2 (500 agent traces via DeepSeek) cost $4. These numbers were chosen deliberately — equal budget, different data strategies — so the three-way model comparison is methodologically fair. Every other component (training compute, inference, APIs) used free tiers.
 
 ---
 
@@ -22,8 +24,8 @@ Built for Indian domestic travel. Trains three SLMs (fine-tuned, distilled, curr
 
 | Component | Technology | Cost |
 |-----------|-----------|------|
-| Phase 1 teacher | OpenAI gpt-4o-mini | Paid (~$1.50 / 5k records) |
-| Phase 2 agent LLM | DeepSeek (`deepseek-chat`) | Free (5M tokens) |
+| Phase 1 teacher | OpenAI gpt-4o-mini | **$4.00** — 5,000 synthetic pairs |
+| Phase 2 agent LLM | DeepSeek (`deepseek-chat`) | **$4.00** — 500 agent traces (matched Phase 1 budget for a fair comparison) |
 | Phase 4 eval judge | Gemini 2.0 Flash (AI Studio) | Free (1M tokens/day) |
 | SLM base model | Llama 3.1 8B (Unsloth + QLoRA r=8) | Free |
 | SLM training (ft) | Google Colab T4, fp16, seq_len=512 | Free |
@@ -219,6 +221,8 @@ phase5_serving/api: REST inference endpoints (GET /health, GET /models, POST /op
 ---
 
 ## Key Design Decisions
+
+**Why 5,000 synthetic pairs and 500 agent traces?** Budget parity. GPT-4o-mini at Phase 1 pricing produced 5,000 validated pairs for exactly $4. DeepSeek multi-agent traces (each trace involves 3–5 real API tool calls across 4 agents) produced 500 traces for exactly $4. Same spend, different data strategy — this makes the fine-tune vs. distill comparison methodologically sound. You're not comparing "more data" against "less data"; you're comparing "clean synthetic" against "richer agent-generated" at equal cost.
 
 **Why three training approaches?** Testing a research question: does distilling DeepSeek's agent reasoning chains produce a better travel optimizer than plain SFT on synthetic pairs? Curriculum training tests whether sequential training (domain first, reasoning second) beats both single-dataset approaches. The three-way comparison is the core portfolio contribution.
 

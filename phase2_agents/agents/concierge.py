@@ -6,7 +6,6 @@ Finds real POIs, restaurants, and web tips matching the traveler's intents.
 """
 
 import json
-import os
 import sys
 from pathlib import Path
 

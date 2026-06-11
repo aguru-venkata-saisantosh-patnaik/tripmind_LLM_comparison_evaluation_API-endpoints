@@ -11,7 +11,11 @@ Each approach tested a different hypothesis:
 - **llama3.1:8b (baseline)** — Untuned Llama 3.1 8B. Establishes the pre-training floor and confirms that fine-tuning was necessary for structured output compliance.
 - **tripmind-ft** — Standard supervised fine-tuning on the 5,000 Phase 1 synthetic pairs (GPT-4o-mini teacher). Tests whether clean, validated <persona, optimized_itinerary> pairs are sufficient.
 - **tripmind-distill** — Knowledge distillation from 500 Phase 2 DeepSeek agent reasoning traces. Tests whether exposing the model to multi-step tool-calling chains improves generalization.
-- **tripmind-curriculum** — Two-stage curriculum: Phase 1 data first, then Phase 2 traces. Tests whether sequential training (domain knowledge before reasoning patterns) beats single-dataset approaches.
+- **tripmind-curriculum** — Two-stage curriculum: Phase 1 data first, then Phase 2 traces. Tests whether sequential training (domain knowledge before reasoning patterns) beats both single-dataset approaches.
+
+### Why these dataset sizes?
+
+The 5,000 / 500 split was a deliberate budget-parity decision. GPT-4o-mini produced 5,000 validated pairs for **$4** (Phase 1). DeepSeek multi-agent traces — each involving 4 agents and 3–5 real MCP tool calls — produced 500 traces for **$4** (Phase 2). Equal spend, different data strategies. This means the ft vs. distill comparison is not confounded by data cost: you're measuring signal quality, not scale. Total project data cost: **$8**. Training compute, inference, and all APIs were free.
 
 ---
 
