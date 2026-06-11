@@ -1,0 +1,45 @@
+# ── Claude Code settings (local IDE config) ───────────────────────────────────
+.claude/
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv*/
+venv/
+env/
+
+# ── Models (4.6 GB each — on HuggingFace instead) ────────────────────────────
+models/
+*.gguf
+*.safetensors
+*.bin
+
+# ── Generated data (reproducible, too large for GitHub) ──────────────────────
+data/synthetic/
+data/traces/
+data/training/
+data/seeds/
+
+# ── Logs (regenerated on each run) ───────────────────────────────────────────
+logs/
+
+# ── API / disk cache ──────────────────────────────────────────────────────────
+.cache/
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
