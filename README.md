@@ -2,13 +2,25 @@
 
 Autonomous multi-agent AI travel optimizer that finds **Price-Pivot Points** — transit, accommodation, and activity substitutions that save ≥5% without degrading trip quality. Built for Indian domestic travel across 20 cities and 5 budget tiers.
 
-The project trains three Llama 3.1 8B LLMs via different supervision signals (SFT, distillation, curriculum learning), then benchmarks all three against an untuned baseline to answer a concrete research question: **does richer teacher signal from multi-agent reasoning traces produce a better travel optimizer than plain SFT on synthetic pairs?**
+The project trains three Llama 3.1 8B LLMs via different supervision signals (SFT, distillation, curriculum learning), benchmarks all three against an untuned baseline, and serves results through a REST API.
 
-**Total data cost: $8.** GPT-4o-mini produced 5,000 synthetic training pairs for $4. DeepSeek V4 Flash produced 500 multi-agent reasoning traces for $4. Equal spend, different data strategies — this makes the fine-tune vs. distill comparison methodologically sound. Training compute (Colab T4, Lightning.ai A100), inference (Ollama), and all external APIs were free.
+**Total data cost: $8.** GPT-4o-mini produced 5,000 synthetic training pairs for $4. DeepSeek V4 Flash produced 500 multi-agent reasoning traces for $4. Equal spend, different data strategies — this makes the fine-tune vs. distill comparison methodologically sound.
 
 ---
 
-## How It Works
+## Skills Demonstrated
+
+| Area | What was built |
+|------|----------------|
+| **Agentic systems** | Supervisor + 3-worker async agent pipeline with checkpoint-resume, concurrency control, and quality filtering |
+| **MCP servers** | 4 custom Model Context Protocol servers (official `mcp` library, SSE transport) wrapping OpenRouteService, Overpass, and DuckDuckGo |
+| **LLM training** | Three QLoRA fine-tuning strategies on Llama 3.1 8B — SFT, knowledge distillation, and 2-stage curriculum learning |
+| **Model evaluation** | 92-case golden set × 10 metrics: structural, semantic, LLM-as-judge (DeepSeek V4 Flash), intent alignment, and adversarial red-teaming |
+| **RESTful API** | FastAPI inference server — 5 endpoints, async Ollama client, Pydantic model validation, auto-generated Swagger docs |
+
+---
+
+## Pipeline
 
 ```
 50k seed personas
@@ -33,9 +45,75 @@ REST inference API (POST /optimize, GET /results/summary)
 
 ---
 
-## Evaluation Results
+## Agentic Implementation
 
-92 test cases across all four models. Full analysis: [`RESULTS.md`](RESULTS.md).
+A Supervisor orchestrates a 3-agent async chain. Each agent has a distinct role and tool set:
+
+```
+phase2_agents/run.py  (CLI — concurrency, checkpoint-resume)
+        │
+  Supervisor  ──  opens async connections to all 4 MCP servers
+        │
+  MCPAdapter  ──  exposes MCP tools in OpenAI function-calling format
+        │
+  [Analyst]   ──  get_route, search_hotels, search_flights → cost_report
+        │
+  [Concierge] ──  search_pois, search_restaurants, web_search → substitutions
+        │
+  [Optimizer] ──  all tools → optimized itinerary + pivot_analysis
+        │
+  TraceRecord  →  data/traces/agent_traces_all.jsonl
+```
+
+The pipeline runs up to 3 traces concurrently (`--concurrency 3`), auto-resumes after crashes by skipping already-processed record IDs, and applies a quality filter that discards traces with looping tool calls, empty optimizer responses, or fewer than 50 API calls. This brought 545 raw traces down to 500 clean ones.
+
+See [`phase2_agents/README.md`](phase2_agents/README.md) for schema, run instructions, and design decisions.
+
+---
+
+## MCP Servers
+
+Four custom MCP servers built using the official `mcp` Python library (SSE transport on localhost). Each wraps a different external API and exposes typed tools that plug directly into Claude Desktop, Claude Code, or any MCP-compatible agent without modification.
+
+| Server | Port | Data Source | Tools |
+|--------|------|-------------|-------|
+| `routing_server.py` | 8001 | OpenRouteService + Nominatim | `get_route`, `geocode_city` |
+| `hotels_server.py` | 8002 | Overpass API (OSM) + haversine | `search_hotels`, `search_flights` |
+| `overpass_server.py` | 8003 | Overpass API (OSM) | `search_pois`, `search_restaurants` |
+| `search_server.py` | 8004 | DuckDuckGo | `web_search` |
+
+All servers use `@api_cache(ttl=86400)` from `utils/cache.py`. The 20-city network has ~380 unique city pairs — caching collapses 500 agent runs to ~40 real Overpass/ORS calls, staying well within free-tier rate limits.
+
+```bash
+python phase2_agents/mcp_servers/routing_server.py   # port 8001
+python phase2_agents/mcp_servers/hotels_server.py    # port 8002
+python phase2_agents/mcp_servers/overpass_server.py  # port 8003
+python phase2_agents/mcp_servers/search_server.py    # port 8004
+```
+
+---
+
+## LLM Training
+
+Three Llama 3.1 8B models trained with QLoRA (r=8, Unsloth) to test one research question: **does distilling multi-agent reasoning traces produce a better travel optimizer than plain SFT on synthetic pairs?**
+
+| Model | Training data | Strategy | Hardware | Final loss |
+|-------|--------------|----------|----------|------------|
+| `tripmind-ft` | 4,749 Phase 1 pairs | Single-stage SFT | Colab T4, fp16, seq_len=512 | 0.225 |
+| `tripmind-distill` | 449 Phase 2 traces | Single-stage SFT on reasoning chains | Lightning.ai A100, bf16, seq_len=16384 | 0.254 |
+| `tripmind-curriculum` | Phase 1 → Phase 2 | Two-stage SFT, same model object | Lightning.ai A100, bf16, seq_len=16384 | 0.241 / 0.505 |
+
+Curriculum training uses two sequential `SFTTrainer` calls on the same model — Stage 1 at lr=2e-4 for domain knowledge, Stage 2 at lr=5e-5 (4× lower) to prevent catastrophic forgetting of the structured-output behavior learned in Stage 1. All models exported to GGUF Q4_K_M (4.6 GB each) and registered with Ollama.
+
+HuggingFace: `agurusantosh/tripmind-{ft,distill,curriculum}-{lora,gguf}`
+
+See [`phase3_training/README.md`](phase3_training/README.md) for training configs, data preparation, and re-run instructions.
+
+---
+
+## Model Evaluation
+
+92 golden test cases × 4 models (3 fine-tuned + untuned baseline) across 10 metrics. Judge: DeepSeek V4 Flash via LLM-as-judge for reasoning coherence and grounding accuracy. Intent alignment uses `all-MiniLM-L6-v2` (sentence-transformers, local). 45 adversarial red-team prompts test constraint robustness.
 
 | Metric | baseline | tripmind-ft | tripmind-distill | tripmind-curriculum |
 |--------|:--------:|:-----------:|:----------------:|:-------------------:|
@@ -50,9 +128,9 @@ REST inference API (POST /optimize, GET /results/summary)
 | Grounding accuracy | —‡ | **89.5%** | 44.2% | **88.0%** |
 | Red-team pass | —§ | 53.3% | 46.7% | **60.0%** |
 
-† Baseline BERTScore is misleadingly high despite 0% JSON validity — semantic embedding similarity rewards natural language that mentions the same cities and concepts even without structure. ROUGE-L (12.6%) correctly captures the format gap.  
-‡ Grounding accuracy uses an LLM judge on parsed JSON output — not applicable when JSON validity is 0%.  
-§ Red-team adversarial evaluation requires structured output to assess constraint compliance — not applicable at 0% JSON validity.
+† BERTScore is misleadingly high for the baseline despite 0% JSON validity — semantic embeddings reward natural language about the same cities and concepts even without structure. ROUGE-L (12.6%) correctly captures the format gap.  
+‡ Grounding accuracy uses the LLM judge on parsed output — not applicable at 0% JSON validity.  
+§ Red-team evaluation requires structured output to assess constraint compliance — not applicable at 0% JSON validity.
 
 **Pairwise comparison (LLM judge, 92 cases):** tripmind-ft produced the better itinerary in 72 of 92 cases versus tripmind-distill (78% win rate), and in 52 of 92 cases versus tripmind-curriculum (57%). The distill vs. curriculum matchup was essentially a coin flip at 52%.
 
@@ -61,24 +139,38 @@ REST inference API (POST /optimize, GET /results/summary)
 ![Head-to-head win rates](data/evals/charts/head_to_head.png)
 ![Red-team pass rates](data/evals/charts/red_team_pass.png)
 
+Full analysis and findings: [`RESULTS.md`](RESULTS.md) | Eval pipeline: [`phase4_evals/README.md`](phase4_evals/README.md)
+
 ---
 
-## Tech Stack
+## REST API
 
-| Component | Technology | Cost |
-|-----------|-----------|------|
-| Synthetic data | OpenAI gpt-4o-mini | **$4.00** — 5,000 training pairs |
-| Agent reasoning traces | DeepSeek V4 Flash (`deepseek-chat`) | **$4.00** — 500 traces (budget-matched to Phase 1) |
-| Eval judge | DeepSeek V4 Flash (`deepseek-chat`) | Included in Phase 2 key |
-| LLM base model | Llama 3.1 8B (Unsloth + QLoRA r=8) | Free |
-| LLM training (ft) | Colab T4, fp16, seq_len=512 | Free |
-| LLM training (distill, curriculum) | Lightning.ai A100, bf16, seq_len=16384 | Free (3h credit) |
-| LLM inference | Ollama (local, GGUF Q4_K_M, 4.6 GB each) | Free |
-| Routing | OpenRouteService + Nominatim | Free |
-| Hotels / POIs | Overpass API (OpenStreetMap) + haversine | Free |
-| Web search | duckduckgo-search (no API key) | Free |
-| Intent alignment | sentence-transformers `all-MiniLM-L6-v2` (local) | Free |
-| Inference API | FastAPI + Uvicorn | Free |
+FastAPI inference server with 5 endpoints. Async `httpx` client keeps the server responsive during long Ollama inference. Model names are validated against a registry in `schemas.py` — passing an arbitrary string returns a 422 with the list of valid options, preventing injection. Swagger UI auto-generated at `/docs`.
+
+```bash
+uvicorn phase5_serving.api.main:app --reload --port 8000
+open http://localhost:8000/docs
+```
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/health` | Ollama reachability + loaded model list |
+| `GET` | `/models` | All 4 models with training descriptions |
+| `POST` | `/optimize` | Run inference — persona in, itinerary out |
+| `GET` | `/results/summary` | Latest eval summary JSON (instant, no inference) |
+| `GET` | `/results/compare` | Head-to-head win rates from eval results |
+
+```bash
+curl -X POST http://localhost:8000/optimize \
+  -H "Content-Type: application/json" \
+  -d '{"model": "tripmind-ft", "persona": {
+        "starting_city": "Mumbai", "destination_city": "Delhi",
+        "type": "Solo", "size": {"adults": 1, "children": 0},
+        "intents": ["Adventure"], "budget": "Shoestring",
+        "duration_days": 5, "duration_nights": 4}}'
+```
+
+See [`phase5_serving/README.md`](phase5_serving/README.md) for setup, environment variables, and design notes.
 
 ---
 
@@ -149,69 +241,33 @@ cp .env.example .env
 
 ---
 
-## Running the Agent Pipeline
+## Tech Stack
 
-```bash
-# Terminal 1–4: start MCP servers
-python phase2_agents/mcp_servers/routing_server.py   # port 8001
-python phase2_agents/mcp_servers/hotels_server.py    # port 8002
-python phase2_agents/mcp_servers/overpass_server.py  # port 8003
-python phase2_agents/mcp_servers/search_server.py    # port 8004
-
-# Terminal 5: run agents
-python phase2_agents/run.py --limit 25 --concurrency 3 --verbose
-```
-
----
-
-## Running Inference
-
-Register GGUFs with Ollama (run once from project root):
-
-```bash
-ollama create tripmind-ft         -f phase3_training/notebooks/modelfiles/Modelfile.ft
-ollama create tripmind-distill    -f phase3_training/notebooks/modelfiles/Modelfile.distill
-ollama create tripmind-curriculum -f phase3_training/notebooks/modelfiles/Modelfile.curriculum
-ollama pull llama3.1:8b
-
-ollama run tripmind-ft "Persona: Solo, Delhi to Goa, Budget+, 5 days. Optimize."
-```
-
-HuggingFace model repos (LoRA + GGUF): `agurusantosh/tripmind-{ft,distill,curriculum}-{lora,gguf}`
-
----
-
-## REST API
-
-```bash
-uvicorn phase5_serving.api.main:app --reload --port 8000
-open http://localhost:8000/docs    # Swagger UI
-```
-
-```bash
-curl -X POST http://localhost:8000/optimize \
-  -H "Content-Type: application/json" \
-  -d '{"model": "tripmind-ft", "persona": {
-        "starting_city": "Mumbai", "destination_city": "Delhi",
-        "type": "Solo", "size": {"adults": 1, "children": 0},
-        "intents": ["Adventure"], "budget": "Shoestring",
-        "duration_days": 5, "duration_nights": 4}}'
-```
-
-Endpoints: `GET /health`, `GET /models`, `POST /optimize`, `GET /results/summary`, `GET /results/compare`
+| Component | Technology | Cost |
+|-----------|-----------|------|
+| Synthetic data | OpenAI gpt-4o-mini | **$4.00** — 5,000 training pairs |
+| Agent reasoning traces | DeepSeek V4 Flash (`deepseek-chat`) | **$4.00** — 500 traces (budget-matched to Phase 1) |
+| Eval judge | DeepSeek V4 Flash (`deepseek-chat`) | Included in Phase 2 key |
+| LLM base model | Llama 3.1 8B (Unsloth + QLoRA r=8) | Free |
+| LLM training (ft) | Colab T4, fp16, seq_len=512 | Free |
+| LLM training (distill, curriculum) | Lightning.ai A100, bf16, seq_len=16384 | Free (3h credit) |
+| LLM inference | Ollama (local, GGUF Q4_K_M, 4.6 GB each) | Free |
+| Routing | OpenRouteService + Nominatim | Free |
+| Hotels / POIs | Overpass API (OpenStreetMap) + haversine | Free |
+| Web search | duckduckgo-search (no API key) | Free |
+| Intent alignment | sentence-transformers `all-MiniLM-L6-v2` (local) | Free |
+| Inference API | FastAPI + Uvicorn | Free |
 
 ---
 
 ## Key Design Decisions
 
-**Why 5,000 synthetic pairs and 500 agent traces?** Budget parity. GPT-4o-mini produced 5,000 validated pairs for exactly $4. DeepSeek V4 Flash multi-agent traces (each involving 4 agents and 3–5 real API tool calls) produced 500 traces for exactly $4. Same spend, different data strategy — the comparison measures signal quality, not scale.
+**Why 5,000 synthetic pairs and 500 agent traces?** Budget parity. Both datasets cost exactly $4 — the comparison measures signal quality, not data scale.
 
-**Why three training approaches?** Testing a research question: does distilling multi-agent reasoning chains produce a better travel optimizer than plain SFT on synthetic pairs? Curriculum training tests whether sequential domain-then-reasoning training beats both single-dataset approaches.
+**Why three training approaches?** Testing a concrete hypothesis: does distilling multi-agent reasoning chains produce a better travel optimizer than plain SFT? Curriculum learning tests whether sequential domain-then-reasoning training beats both single-signal approaches.
 
-**Why DeepSeek V4 Flash for both agents and eval judge?** OpenAI-compatible API, strong function-calling, and cost-effective for both Phase 2 trace generation and Phase 4 LLM judging. Using the same model for both keeps the eval pipeline self-consistent.
+**Why DeepSeek V4 Flash for both agents and eval judge?** OpenAI-compatible API, strong function-calling, cost-effective for both Phase 2 trace generation and Phase 4 LLM judging. Using the same model for both keeps the evaluation self-consistent.
 
-**Why MCP servers?** Standard protocol via the official `mcp` Python library (SSE transport). The same 4 servers plug directly into Claude Desktop or Claude Code without modification.
+**Why MCP servers over direct API calls?** Standard protocol — the same 4 servers plug into Claude Desktop or Claude Code without modification. Purpose-built tools for each external service keeps agent prompts clean and tool results typed.
 
-**Why cache all API responses?** The 20-city network has ~380 unique city pairs. Caching collapses 500 agent runs to ~40 real Overpass/ORS calls — well within free-tier rate limits.
-
-**Why Ollama + GGUF for inference?** The trained models are 8B parameter LLMs quantized to Q4_K_M (4.6 GB each). Ollama runs them on consumer hardware (MacBook Air 8 GB) with no GPU required, making the full pipeline reproducible without cloud infrastructure.
+**Why Ollama + GGUF?** Runs 8B parameter models on a MacBook Air 8 GB with no GPU. Makes the full pipeline reproducible without cloud infrastructure.
